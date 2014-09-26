@@ -1,0 +1,4 @@
+[program:docker-builder]
+command=/usr/local/bin/docker-builder
+startsecs=5
+autorestart=true
