@@ -132,6 +132,6 @@ func buildImage(w http.ResponseWriter, r *http.Request) {
 		sendError(err, w)
 		return
 	}
-
+	os.RemoveAll(wd)
 }
 

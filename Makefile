@@ -1,4 +1,4 @@
-APP_NAME=docker_builder
+APP_NAME=docker-builder
 
 run: build
 	./bin/${APP_NAME}
