@@ -9,13 +9,11 @@ import (
 	"fmt"
 	"encoding/json"
 	"io"
-	"archive/tar"
-	"io/ioutil"
 	"strings"
+	"errors"
+	"encoding/base64"
 	"crypto/rand"
-	"crypto/md5"
 	"math/big"
-	"os/exec"
 )
 
 var workingDir string
@@ -55,83 +53,45 @@ func sendError(err error, w http.ResponseWriter) {
 	log.Println(err)
 }
 
-func createTempDir() (string, error) {
-	randomInt, err := rand.Int(rand.Reader, big.NewInt(65536))
+func postDocker(url, contentType string, body io.ReadCloser) error {
+	resp, err := http.DefaultClient.Post(url, contentType, body)
 	if err != nil {
-		return "", err
+		return err
+	} else if resp.StatusCode > 299 {
+		return errors.New(fmt.Sprintf("Error received from builder: %v", resp.Status))
 	}
-	hash := fmt.Sprintf("%x", md5.Sum([]byte(fmt.Sprintf("%v", randomInt))))
-	wd, err := ioutil.TempDir(workingDir, hash)
-	if err != nil {
-		return "", err
-	}
-	log.Printf("Extracting to %v\n", wd)
-	return wd, nil
-}
-
-func extractBody(body io.Reader) (string, error) {
-	tarReader := tar.NewReader(body)
-	wd, err := createTempDir()
-	if err != nil {
-		return "", err
-	}
-	for {
-		header, err := tarReader.Next()
-		if err != nil {
-			if err == io.EOF {
-				break
-			}
-			return "", err
-		}
-		destName := strings.Join([]string{wd, header.Name}, "/")
-		fmt.Println([]string{wd, header.Name})
-		mode := header.FileInfo().Mode()
-		if header.FileInfo().IsDir() {
-			os.MkdirAll(destName, mode)
-		} else {
-			destFile, err := os.Create(destName)
-			if err != nil {
-				return "", err
-			}
-			destFile.Chmod(mode)
-			io.Copy(destFile, tarReader)
-		}
-	}
-	return wd, nil
+	return nil
 }
 
 func buildImage(w http.ResponseWriter, r *http.Request) {
-	wd, err := extractBody(r.Body)
-	if err != nil {
-		sendError(err, w)
-		return
-	}
-	tag := r.Header.Get("x-tag")
-	cmd := exec.Command("docker", "build", "-t", tag, wd)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		log.Printf("%v - %v", cmd.Args, string(output))
-		sendError(err, w)
-		return
-	}
-
+	uid, _ := rand.Int(rand.Reader, big.NewInt(999999999))
+	log.Printf("[%09d]Build start", uid)
 	registryHost := r.Header.Get("x-registry")
+	tag := r.Header.Get("x-tag")
 	registryTag := fmt.Sprintf("%v/%v", registryHost, tag)
-	cmd = exec.Command("docker", "tag", tag, registryTag)
-	output, err = cmd.CombinedOutput()
+
+	err := postDocker(fmt.Sprintf("http://127.0.0.1:4243/build?t=%v", tag), "application/tar", r.Body)
 	if err != nil {
-		log.Printf("%v - %v", cmd.Args, string(output))
 		sendError(err, w)
 		return
 	}
 
-	cmd = exec.Command("docker", "push", registryTag)
-	output, err = cmd.CombinedOutput()
+	err = postDocker(fmt.Sprintf("http://127.0.0.1:4243/images/%v/tag?repo=%v", tag, registryTag), "application/json", nil)
 	if err != nil {
-		log.Printf("%v - %v", cmd.Args, string(output))
 		sendError(err, w)
 		return
 	}
 
+	elements := strings.Split(registryTag, ":")
+	version := elements[len(elements)-1]
+	image := strings.Join(elements[:len(elements)-1], ":")
+	req, err := http.NewRequest("POST", fmt.Sprintf("http://127.0.0.1:4243/images/%v/push?tag=%v", image, version), nil)
+	req.Header.Add("X-Registry-Auth", base64.StdEncoding.EncodeToString(([]byte)(strings.Replace("{'auth':'','email':''}", "'", "\"", 0))))
+	http.DefaultClient.Do(req)
+	if err != nil {
+		sendError(err, w)
+		return
+	}
+	log.Printf("[%09d]Build end", uid)
 }
 
